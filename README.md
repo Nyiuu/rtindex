@@ -1,6 +1,6 @@
 # RTIndeX Experiments
 
-This repository contains the code for the paper _RTIndeX: Exploiting Hardware-Accelerated GPU Raytracing for Database Indexing_, available at TBA.
+This repository contains the code for the paper _RTIndeX: Exploiting Hardware-Accelerated GPU Raytracing for Database Indexing_, preprint at <https://arxiv.org/abs/2303.01139>.
 
 The code builds upon Ingo Wald's SIGGRAPH course, available at <https://github.com/ingowald/optix7course>.
 
