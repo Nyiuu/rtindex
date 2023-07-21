@@ -7,8 +7,8 @@
 
 #include <cub/cub.cuh>
 
+#include <thrust/shuffle.h>
 #include <thrust/sort.h>
-#include <thrust/iterator/counting_iterator.h>
 
 #include "cuda_buffer.cuh"
 
@@ -46,43 +46,6 @@ void rti_assert(bool predicate, const std::string& desc = {}) {
 }
 
 
-class zipf_index_distribution final {
-    std::vector<double> cdf;
-    double normalization;
-    std::uniform_real_distribution<double> dis;
-
-public:
-    zipf_index_distribution(size_t size, double exp) : dis(0.0, 1.0) {
-        double sum = 0;
-        for (size_t i = 0; i < size; ++i) {
-            sum += 1.0 / std::pow(i + 1, exp);
-        }
-        normalization = 1.0 / sum;
-
-        cdf.resize(size);
-        size_t cumsum = 0;
-        for (size_t i = 0; i < size; ++i) {
-            cdf[i] = cumsum = cumsum + normalization / std::pow(i + 1, exp);
-        }
-    }
-
-    template <typename gen_type>
-    size_t operator()(gen_type gen) {
-        double draw = dis(gen);
-
-        size_t offset = 0;
-        for (size_t skip = size_t(1) << 63u; skip > 0; skip >>= 1) {
-            if (offset + skip >= cdf.size())
-                continue;
-            if (draw >= cdf[offset + skip])
-                continue;
-            offset += skip;
-        }
-        return offset;
-    }
-};
-
-
 template <typename key_type, typename iterator_type>
 void draw_without_replacement(
     iterator_type output_iterator,
@@ -94,7 +57,7 @@ void draw_without_replacement(
     std::mt19937 gen(h(min_key) ^ h(max_key));
     std::uniform_int_distribution<key_type> key_dist(min_key, max_key);
 
-    // reservior sampling would be more appropriate here
+    // reservoir sampling would be more appropriate here
 
     if (size_t(max_key - min_key + 1) > size * 2) {
         std::unordered_set<key_type> output_set;
@@ -151,6 +114,14 @@ template <typename elem_type>
 void sort_vector(std::vector<elem_type>& vec) {
     thrust::sort(thrust::host, vec.begin(), vec.end());
     //std::sort(vec.begin(), vec.end());
+}
+
+
+template <typename elem_type>
+void shuffle_vector(std::vector<elem_type>& vec) {
+    std::mt19937 gen(vec.size());
+    std::shuffle(vec.begin(), vec.end(), gen);
+    //thrust::shuffle(thrust::host, vec.begin(), vec.end(), gen);
 }
 
 
@@ -223,6 +194,8 @@ size_t find_pair_sort_buffer_size(size_t input_size) {
 
 template <typename key_type>
 void untimed_sort(void* temp, size_t temp_bytes, const key_type* input, key_type* output, size_t input_size) {
+    // future work: use a different algo for small input buffers
+    // maybe check out cub::BlockRadixSort or cub::StableOddEvenSort
     cub::DeviceRadixSort::SortKeys(temp, temp_bytes, input, output, input_size, 0, sizeof(key_type) * 8);
 }
 
@@ -267,6 +240,14 @@ void timed_pair_sort(void* temp, size_t temp_bytes, const key_type* ki, key_type
 }
 
 
+GLOBALQUALIFIER
+void init_offsets_kernel(rti_idx* buffer, size_t size) {
+    const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid >= size) return;
+    buffer[tid] = static_cast<rti_idx>(tid);
+}
+
+
 void init_offsets(rti_idx* buffer, size_t size, double* time_ms) {
     cuda_timer timer(0);
 
@@ -274,17 +255,61 @@ void init_offsets(rti_idx* buffer, size_t size, double* time_ms) {
         timer.start();
     }
 
-    lambda_kernel<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE>>>(
-        [=] DEVICEQUALIFIER {
-            const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
-            if (tid >= size) return;
-            buffer[tid] = static_cast<rti_idx>(tid);
-        });
+    init_offsets_kernel<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE>>>(buffer, size);
 
     if (time_ms) {
         timer.stop();
         *time_ms += timer.time_ms();
     }
+}
+
+
+class zipf_index_distribution final {
+    std::vector<double> cdf;
+    double normalization;
+    std::uniform_real_distribution<double> dis;
+
+public:
+    zipf_index_distribution(size_t size, double exp) : dis(0.0, 1.0) {
+        double sum = 0;
+        for (size_t i = 0; i < size; ++i) {
+            sum += 1.0 / std::pow(i + 1, exp);
+        }
+        normalization = 1.0 / sum;
+
+        cdf.resize(size);
+        double cumsum = 0;
+        for (size_t i = 0; i < size; ++i) {
+            cdf[i] = cumsum = cumsum + normalization / std::pow(i + 1, exp);
+        }
+    }
+
+    template <typename gen_type>
+    size_t operator()(gen_type& gen) {
+        double draw = dis(gen);
+
+        size_t offset = 0;
+        for (size_t skip = size_t(1) << 63u; skip > 0; skip >>= 1) {
+            if (offset + skip >= cdf.size())
+                continue;
+            if (draw <= cdf[offset + skip])
+                continue;
+            offset += skip;
+        }
+        return offset;
+    }
+};
+
+
+inline void test_zipf() {
+    std::mt19937 gen(42);
+    std::vector<size_t> ind(60);
+
+    zipf_index_distribution dist(20, 0);
+    for (size_t i = 0; i < ind.size(); ++i) {
+        ind[i] = dist(gen);
+    }
+    show_vector(ind);
 }
 
 

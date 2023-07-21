@@ -5,7 +5,6 @@
 // this include may only appear in a single source file:
 #include <optix_function_table_definition.h>
 
-
 extern "C" char embedded_ptx_code[];
 
 
@@ -71,6 +70,8 @@ void optix_wrapper::create_module() {
     module_compile_options.maxRegisterCount  = 0;
     module_compile_options.optLevel          = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
     module_compile_options.debugLevel        = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+    // set this for profiling
+    //module_compile_options.debugLevel        = OPTIX_COMPILE_DEBUG_LEVEL_MODERATE;
 
     pipeline_compile_options = {};
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
@@ -108,4 +109,3 @@ void optix_wrapper::create_sphere_module() {
     builtin_is_options.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_SPHERE;
     OPTIX_CHECK(optixBuiltinISModuleGet(optix_context, &module_compile_options, &pipeline_compile_options, &builtin_is_options, &sphere_module));
 }
-

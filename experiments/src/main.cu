@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <exception>
 #include <iostream>
 #include <iomanip>
 #include <numeric>
@@ -10,6 +9,7 @@
 #include <unordered_set>
 
 #include <cub/cub.cuh>
+#include <nvtx3/nvtx3.hpp>
 
 #include "test_configuration.h"
 
@@ -160,7 +160,7 @@ void setup_build_input(OptixAccelBuildOptions& bi, bool update = false) {
 #if COMPACTION != 0
     bi.buildFlags |= OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
 #endif
-#if PERFORM_UPDATES != 0
+#if NUM_UPDATES_LOG > 0
     bi.buildFlags |= OPTIX_BUILD_FLAG_ALLOW_UPDATE;
 #endif
     bi.motionOptions.numKeys = 1;
@@ -176,8 +176,7 @@ OptixTraversableHandle build_traversable(
     size_t& final_size,
     double& convert_time_ms,
     double& build_time_ms,
-    double& compact_time_ms,
-    bool allow_update = false
+    double& compact_time_ms
 ) {
     uncompacted_size = 0;
     final_size = 0;
@@ -404,14 +403,80 @@ void apply_permutation(std::vector<key_type>& vec, const std::vector<std::size_t
 }
 
 
+constexpr value_type value_for(key_type key) {
+    return ((value_type) key) * 3 / 2;
+}
+
+
+template <typename random_type>
+bool generate_dense_build_set(random_type gen, size_t num_keys, size_t key_stride, size_t key_offset, bool swap_minmax_to_end, std::vector<key_type>& generated_keys) {
+    generated_keys.resize(num_keys);
+    // generate dense keys with the specified offset and stride and replication
+    for (size_t i = 0; i < generated_keys.size(); ++i) {
+        size_t new_key = i * key_stride + key_offset;
+        if (new_key > max_key) return false;
+        generated_keys[i] = key_type(new_key);
+    }
+    // shuffle the keys
+    if (swap_minmax_to_end) {
+        // reserve the first and the last key for out-of-range misses by swapping them to the end
+        std::swap(generated_keys[0], generated_keys[num_keys - 2]);
+        std::shuffle(generated_keys.begin(), generated_keys.end() - 2, gen);
+    } else {
+        std::shuffle(generated_keys.begin(), generated_keys.end(), gen);
+    }
+    return true;
+}
+
+
+template <typename random_type>
+bool generate_uniform_build_set(random_type gen, size_t num_keys, size_t key_stride, size_t key_offset, bool reserve_minmax, std::vector<key_type>& generated_keys) {
+    generated_keys.resize(num_keys);
+
+    size_t base_max_key = (max_key - key_offset) / key_stride;
+    std::uniform_int_distribution<size_t> dist(0, base_max_key);
+
+    // generate dense keys with the specified offset and stride and replication
+    std::unordered_set<key_type> generated_keys_set;
+    while (generated_keys_set.size() < num_keys) {
+        size_t new_key = dist(gen) * key_stride + key_offset;
+        // this should never happen, but check anyway just to be sure
+        if (new_key > max_key) return false;
+        if (new_key < key_offset) return false;
+        if ((new_key - key_offset) % key_stride != 0) return false;
+        generated_keys_set.insert((key_type) new_key);
+    }
+    std::copy(generated_keys_set.begin(), generated_keys_set.end(), generated_keys.begin());
+    if (reserve_minmax) {
+        // reserve the first and the last key for out-of-range misses by swapping them to the end
+        auto min_it = std::min_element(generated_keys.begin(), generated_keys.end());
+        auto max_it = std::max_element(generated_keys.begin(), generated_keys.end());
+        std::swap(*min_it, generated_keys[num_keys - 2]);
+        std::swap(*max_it, generated_keys[num_keys - 1]);
+    }
+    return true;
+}
+
+
 bool generate_input(
+    // number of unique keys to generate
     size_t num_build_keys,
+    // uniformly pick this many keys from the build set to form the probe set
     size_t num_probe_keys,
+    // distance between keys (1 means dense)
     size_t key_stride,
+    // first key to generate
     size_t key_offset,
+    // some of the build keys will not be inserted so that some probes will miss
     bool reserve_keys_for_misses,
+    // percentage of probe keys which will not occur in the build set
     size_t miss_percent,
+    // percentage of probe keys which will be strictly smaller or larger than all keys in the build set
     size_t out_of_range_percent,
+    // replicate each key so that the generated build set contains duplicates
+    size_t key_replication,
+    // draw keys from the entire range of values
+    bool uniform_keys,
     std::vector<key_type>& build_keys,
     std::vector<value_type>& build_values,
     std::vector<key_type>& probe_keys,
@@ -426,35 +491,32 @@ bool generate_input(
 
     size_t num_miss_keys_to_probe = num_probe_keys * miss_percent / 100;
     size_t num_out_of_range_keys_to_probe = num_probe_keys * out_of_range_percent / 100;
-    size_t num_reserved_keys = reserve_keys_for_misses ? 62u : 0u;
+    size_t num_reserved_keys = reserve_keys_for_misses ? 40u : 0u;
 
-    // generate dense keys with the specified offset and stride
-    std::vector<key_type> generated_keys(num_build_keys);
-    for (size_t i = 0; i < generated_keys.size(); ++i) {
-        size_t new_key = i * key_stride + key_offset;
-        if (new_key > max_key) return false;
-        generated_keys[i] = key_type(new_key);
-    }
-    // shuffle the keys
-    if (reserve_keys_for_misses) {
-        // reserve the first and the last key for out-of-range misses by swapping them to the end
-        std::swap(generated_keys[0], generated_keys[num_build_keys - 2]);
-        std::shuffle(generated_keys.begin(), generated_keys.end() - 2, gen);
+    std::vector<key_type> generated_keys;
+    bool success;
+    if (uniform_keys) {
+        success = generate_uniform_build_set(gen, num_build_keys, key_stride, key_offset, reserve_keys_for_misses, generated_keys);
     } else {
-        std::shuffle(generated_keys.begin(), generated_keys.end(), gen);
+        success = generate_dense_build_set(gen, num_build_keys, key_stride, key_offset, reserve_keys_for_misses, generated_keys);
     }
+    if (!success) return false;
 
     // copy the first part to use for building the index
-    build_keys.resize(num_build_keys - num_reserved_keys - 2);
+    size_t num_remaining_keys = num_build_keys - num_reserved_keys - 2;
+    build_keys.resize(num_remaining_keys * key_replication);
     build_values.resize(build_keys.size());
-    for (size_t i = 0; i < build_keys.size(); ++i) {
-        build_keys[i] = generated_keys[i];
-        build_values[i] = generated_keys[i] << 1u;
+    for (size_t i = 0; i < num_remaining_keys; ++i) {
+        for (size_t repl = 0; repl < key_replication; ++repl) {
+            // the index is chosen such that identical keys never end up next to each other
+            build_keys[num_remaining_keys * repl + i] = generated_keys[i];
+            build_values[num_remaining_keys * repl + i] = value_for(generated_keys[i]);
+        }
     }
     // reserve the remaining keys to simulate misses
     std::vector<key_type> reserved_keys(num_reserved_keys);
     for (size_t i = 0; i < reserved_keys.size(); ++i) {
-        reserved_keys[i] = generated_keys[i + build_keys.size()];
+        reserved_keys[i] = generated_keys[i + num_remaining_keys];
     }
     // these are the out-of-range misses
     key_type smallest_value = generated_keys[num_build_keys - 2];
@@ -481,7 +543,8 @@ bool generate_input(
         size_t random_index = dist(gen);
         size_t offset = num_miss_keys_to_probe + num_out_of_range_keys_to_probe;
         probe_keys[offset + i] = build_keys[random_index];
-        expected_values[offset + i] = build_values[random_index];
+        // each value will occur multiple times when key replication is active
+        expected_values[offset + i] = key_replication * value_for(build_keys[random_index]);
     }
     // shuffle the entire probe set
     for (size_t i = 0; i < num_probe_keys; ++i) {
@@ -493,6 +556,7 @@ bool generate_input(
 
     return true;
 }
+
 
 bool generate_range_query_input(
     size_t num_build_keys,
@@ -565,14 +629,22 @@ bool generate_range_query_input(
     return true;
 }
 
+
 void generate_updates(
-    size_t num_updates,
+    size_t num_updates_log,
+    size_t local_update_chunk_size_log,
     std::vector<key_type>& build_keys,
     std::vector<value_type>& build_values
 ) {
     static std::mt19937 gen(std::random_device{}());
+    size_t num_updates = size_t{1} << num_updates_log;
+    size_t local_update_chunk_size = size_t{1} << local_update_chunk_size_log;
+
+#if UPDATE_TYPE == 0
+    // global updates: shuffle a subset
 
     std::vector<size_t> indices(build_keys.size());
+    // generate an index permutation so that the fisher-yates shuffle operates on a random subset
     std::iota(indices.begin(), indices.end(), 0);
     std::shuffle(indices.begin(), indices.end(), gen);
 
@@ -584,7 +656,59 @@ void generate_updates(
         std::swap(build_keys[indices[i]], build_keys[indices[j]]);
         std::swap(build_values[indices[i]], build_values[indices[j]]);
     }
+
+#elif UPDATE_TYPE == 1
+    // position-local updates: randomly pick and reverse sub-ranges of the build key array
+
+    // pick update locations without replacement
+    size_t num_possible_offsets = build_keys.size() / local_update_chunk_size;
+    std::vector<size_t> offsets(num_possible_offsets);
+    std::iota(offsets.begin(), offsets.end(), 0);
+    std::shuffle(offsets.begin(), offsets.end(), gen);
+
+    size_t num_local_updates_to_perform = num_updates / local_update_chunk_size;
+    // locally reverse a sub-range of the keys (by index)
+    for (size_t up = 0; up < num_local_updates_to_perform; ++up) {
+        size_t index_offset = offsets[up] * local_update_chunk_size;
+        size_t half_chunk_size = local_update_chunk_size >> 1u;
+        for (size_t i = 0; i < half_chunk_size; ++i) {
+            size_t swap_i = i + index_offset;
+            size_t swap_j = local_update_chunk_size - 1 - i + index_offset;
+            std::swap(build_keys[swap_i], build_keys[swap_j]);
+            std::swap(build_values[swap_i], build_values[swap_j]);
+        }
+    }
+
+#elif UPDATE_TYPE == 2
+    // value-local updates: randomly pick and reverse sub-ranges of the SORTED build key array
+
+    // pick update locations without replacement
+    size_t num_possible_offsets = build_keys.size() / local_update_chunk_size;
+    std::vector<size_t> offsets(num_possible_offsets);
+    std::iota(offsets.begin(), offsets.end(), 0);
+    std::shuffle(offsets.begin(), offsets.end(), gen);
+
+    // generate a sort permutation, i.e., the smallest element in build_keys is at build_keys[perm[0]]
+    auto perm = sort_permutation(build_keys);
+
+    size_t num_local_updates_to_perform = num_updates / local_update_chunk_size;
+    // locally reverse a sub-range of the keys (by rank)
+    for (size_t up = 0; up < num_local_updates_to_perform; ++up) {
+        size_t rank_offset = offsets[up] * local_update_chunk_size;
+        size_t half_chunk_size = local_update_chunk_size >> 1u;
+        for (size_t i = 0; i < half_chunk_size; ++i) {
+            size_t swap_i = perm[i + rank_offset];
+            size_t swap_j = perm[local_update_chunk_size - 1 - i + rank_offset];
+            std::swap(build_keys[swap_i], build_keys[swap_j]);
+            std::swap(build_values[swap_i], build_values[swap_j]);
+        }
+    }
+
+#else
+#error illegal update type
+#endif
 }
+
 
 #define STR(x) #x
 #define STRING(s) STR(s)
@@ -606,21 +730,24 @@ void benchmark() {
     constexpr size_t num_updates_log = NUM_UPDATES_LOG;
     constexpr size_t num_build_keys_log = NUM_BUILD_KEYS_LOG;
     constexpr size_t num_probe_keys_log = NUM_PROBE_KEYS_LOG;
+    constexpr size_t num_rays_per_thread_log = NUM_RAYS_PER_THREAD_LOG;
+    constexpr size_t num_rays_per_thread = size_t{1} << num_rays_per_thread_log;
+    constexpr size_t key_replication_log = KEY_REPLICATION_LOG;
+    constexpr size_t key_replication = size_t{1} << key_replication_log;
+    constexpr size_t local_update_chunk_size_log = LOCAL_UPDATE_CHUNK_SIZE_LOG;
     constexpr bool reserve_keys_for_misses = LEAVE_GAPS_FOR_MISSES;
     constexpr bool start_ray_at_zero = START_RAY_AT_ZERO;
-    constexpr bool perform_updates = PERFORM_UPDATES;
     constexpr bool large_keys = LARGE_KEYS;
+    constexpr bool closest_hit = USE_CLOSESTHIT_INSTEAD_OF_ANYHIT;
+    constexpr bool skip_probing = SKIP_PROBING;
+    constexpr bool force_uniform_keys = FORCE_UNIFORM_KEYS;
 
     do {
         std::cerr << "starting input generation" << std::endl;
 
         size_t num_build_keys = (size_t{1} << num_build_keys_log) - 1u;
         size_t num_probe_keys = size_t{1} << num_probe_keys_log;
-#if PERFORM_UPDATES != 0
-        size_t num_updates = size_t{1} << num_updates_log;
-#else
-        size_t num_updates = 0;
-#endif
+
         // ==================================================================
         // generate input and expected output
         // ==================================================================
@@ -639,6 +766,8 @@ void benchmark() {
             reserve_keys_for_misses,
             miss_percentage,
             out_of_range_percentage,
+            key_replication,
+            force_uniform_keys,
             build_keys,
             build_values,
             probe_lower,
@@ -725,7 +854,7 @@ void benchmark() {
 
         launch_params.traversable = build_traversable(
             optix, build_keys_buffer_d.ptr<key_type>(), build_keys.size(), data_structure_d,
-            uncompacted_size, final_size, convert_time_ms, build_time_ms, compact_time_ms, perform_updates);
+            uncompacted_size, final_size, convert_time_ms, build_time_ms, compact_time_ms);
 
         std::cerr << "built structure" << std::endl;
 
@@ -749,8 +878,8 @@ void benchmark() {
         // update structure
         // ==================================================================
 
-        if (num_updates > 0) {
-            generate_updates(num_updates, build_keys, build_values);
+        if (num_updates_log > 0) {
+            generate_updates(num_updates_log, local_update_chunk_size_log, build_keys, build_values);
             build_keys_buffer_d.upload(build_keys.data(), build_keys.size());
             build_values_buffer_d.upload(build_values.data(), build_values.size());
             std::cerr << "generated 2^" << num_updates_log << " updates" << std::endl;
@@ -824,24 +953,36 @@ void benchmark() {
         }
 #endif
 
+#if SKIP_PROBING == 0
         // ==================================================================
         // launch
         // ==================================================================
 
-        OPTIX_CHECK(optixLaunch(
-                pipeline.pipeline,
-                optix.stream,
-                launch_params_d.cu_ptr(),
-                launch_params_d.size_in_bytes,
-                &pipeline.sbt,
-                probe_lower.size(),
-                1,
-                1
-        ))
+        const uint32_t num_rays = probe_lower.size();
+        const uint32_t num_threads = num_rays / num_rays_per_thread;
+        if (num_threads * num_rays_per_thread != num_rays) {
+            std::cerr << "inexact division when assigning rays to threads" << std::endl;
+            std::exit(1);
+        }
 
-        cudaDeviceSynchronize(); CUERR
+        {
+            nvtx3::scoped_range nvtx_range{"warmup-run"};
 
-        std::cerr << "warmup succesful" << std::endl;
+            OPTIX_CHECK(optixLaunch(
+                    pipeline.pipeline,
+                    optix.stream,
+                    launch_params_d.cu_ptr(),
+                    launch_params_d.size_in_bytes,
+                    &pipeline.sbt,
+                    num_threads,
+                    1,
+                    1
+            ))
+
+            cudaDeviceSynchronize(); CUERR
+        }
+
+        std::cerr << "warmup successful" << std::endl;
 
         // ==================================================================
         // output
@@ -851,8 +992,12 @@ void benchmark() {
         result_buffer_d.download(output.data(), expected_values.size());
         for (size_t i = 0; i < expected_values.size(); ++i) {
             if (output[i] != expected_values[i]) {
-                std::cerr << i << ": " << expected_values[i] << " != " << output[i] << std::endl;
-                throw std::exception();
+#if RANGE_QUERY_HIT_COUNT_LOG == 0
+                std::cerr << i << ": for key " << probe_lower[i] << " expected " << expected_values[i] << " != actual " << output[i] << std::endl;
+#else
+                std::cerr << i << ": for range " << probe_lower[i] << "-" << probe_upper[i] << " expected " << expected_values[i] << " != actual " << output[i] << std::endl;
+#endif
+                std::exit(1);
             }
             //std::cout << i << " " << output[i] << std::endl;
         }
@@ -866,6 +1011,8 @@ void benchmark() {
         double accumulated_runtime_ms = 0;
 
         for (size_t i = 0; i < runs; ++i) {
+            nvtx3::scoped_range nvtx_range{"run-" + std::to_string(i)};
+
             cudaEvent_t timerstart, timerstop;
             float timerdelta;
             cudaEventCreate(&timerstart);
@@ -878,7 +1025,7 @@ void benchmark() {
                     launch_params_d.cu_ptr(),
                     launch_params_d.size_in_bytes,
                     &pipeline.sbt,
-                    probe_lower.size(),
+                    num_threads,
                     1,
                     1
             ))
@@ -890,12 +1037,18 @@ void benchmark() {
         }
 
         cudaDeviceSynchronize(); CUERR
+        double total_probe_time_ms = accumulated_runtime_ms / runs + sort_time_ms;
+#else
+        double total_probe_time_ms = 0;
+#endif
+        double convert_build_time_ms = build_time_ms + convert_time_ms;
+        double convert_build_compact_time_ms = convert_build_time_ms + compact_time_ms;
+        double convert_and_update_time_ms = update_convert_time_ms + update_time_ms;
 
         bool perpendicular_rays = PERPENDICULAR_RAYS;
         bool force_single_anyhit = FORCE_SINGLE_ANYHIT;
         bool compaction = COMPACTION;
         int64_t exponent_bias = EXPONENT_BIAS;
-        double total_probe_time_ms = accumulated_runtime_ms / runs + sort_time_ms;
 
 #if PRIMITIVE == 0
         std::cout << "i_primitive=triangle,";
@@ -909,7 +1062,7 @@ void benchmark() {
 #elif INT_TO_FLOAT_CONVERSION_MODE == 2
         std::cout << "i_key_mode=ext,";
 #elif INT_TO_FLOAT_CONVERSION_MODE == 1
-        std::cout << "i_key_mode=unsafe,";
+        std::cout << "i_key_mode=excl,";
 #else
         std::cout << "i_key_mode=safe,";
 #endif
@@ -929,12 +1082,20 @@ void benchmark() {
 #else
         std::cout << "i_probe_mode=p_sfl,";
 #endif
+#if UPDATE_TYPE == 2
+        std::cout << "i_update_type=rank_local,";
+#elif UPDATE_TYPE == 1
+        std::cout << "i_update_type=pos_local,";
+#else
+        std::cout << "i_update_type=global,";
+#endif
         std::cout << IVAR(num_build_keys_log) << ",";
         std::cout << IVAR(key_offset) << ",";
         std::cout << IVAR(key_stride_log) << ",";
+        std::cout << IVAR(key_replication_log) << ",";
         std::cout << IVAR(reserve_keys_for_misses) << ",";
-        std::cout << IVAR(perform_updates) << ",";
         std::cout << IVAR(num_updates_log) << ",";
+        std::cout << IVAR(local_update_chunk_size_log) << ",";
         std::cout << IVAR(num_probe_keys_log) << ",";
         std::cout << IVAR(miss_percentage) << ",";
         std::cout << IVAR(out_of_range_percentage) << ",";
@@ -945,6 +1106,13 @@ void benchmark() {
         std::cout << IVAR(start_ray_at_zero) << ",";
         std::cout << IVAR(compaction) << ",";
         std::cout << IVAR(large_keys) << ",";
+        std::cout << IVAR(closest_hit) << ",";
+        std::cout << IVAR(skip_probing) << ",";
+        std::cout << IVAR(num_rays_per_thread_log) << ",";
+        std::cout << IVAR(force_uniform_keys) << ",";
+        std::cout << IVAR(x_bits) << ",";
+        std::cout << IVAR(y_bits) << ",";
+        std::cout << IVAR(z_bits) << ",";
         std::cout << IVAR(debug) << ",";
 
         std::cout << OVAR(uncompacted_size) << ",";
@@ -952,9 +1120,11 @@ void benchmark() {
         std::cout << OVAR(update_temp_buffer_size) << ",";
         std::cout << OVAR(convert_time_ms) << ",";
         std::cout << OVAR(build_time_ms) << ",";
+        std::cout << OVAR(convert_build_time_ms) << ",";
+        std::cout << OVAR(convert_build_compact_time_ms) << ",";
         std::cout << OVAR(compact_time_ms) << ",";
         std::cout << OVAR(update_time_ms) << ",";
-        std::cout << OVAR(update_convert_time_ms) << ",";
+        std::cout << OVAR(convert_and_update_time_ms) << ",";
         std::cout << OVAR(sort_time_ms) << ",";
         std::cout << OVAR(total_probe_time_ms) << std::endl;
 

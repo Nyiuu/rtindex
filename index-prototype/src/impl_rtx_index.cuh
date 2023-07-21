@@ -1,8 +1,6 @@
 #ifndef RTX_INDEX_H
 #define RTX_INDEX_H
 
-#include <chrono>
-
 #include "definitions.h"
 #include "cuda_buffer.cuh"
 #include "cuda_helpers.cuh"
@@ -11,10 +9,41 @@
 #include "optix_pipeline.h"
 #include "launch_parameters.cuh"
 
+#include <nvtx3/nvtx3.hpp>
+
+#include <chrono>
+
 
 // these are initialized in main.cu
 extern optix_wrapper optix;
 extern optix_pipeline pipeline;
+
+// for nvtx
+struct nvtx_rtx_domain{ static constexpr char const* name{"rtx"}; };
+
+
+template <typename key_type>
+GLOBALQUALIFIER
+void convert_keys_to_primitives_kernel(const key_type* keys_d, size_t key_count, float3* primitives_d) {
+    const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if (tid >= key_count) return;
+
+    rti_k64 key = (rti_k64) keys_d[tid];
+    float x = uint32_as_float(key & x_mask);
+    float y = uint32_as_float((key >> x_bits) & y_mask);
+    float z = uint32_as_float(key >> (x_bits + y_bits));
+
+    float just_below_x = minus_eps(x);
+    float just_above_x = plus_eps(x);
+    float just_below_y = minus_eps(y);
+    float just_above_y = plus_eps(y);
+    float just_below_z = minus_eps(z);
+    float just_above_z = plus_eps(z);
+
+    primitives_d[3 * tid + 0] = make_float3(just_below_x, just_above_y, just_below_z);
+    primitives_d[3 * tid + 1] = make_float3(just_below_x, just_below_y, just_below_z);
+    primitives_d[3 * tid + 2] = make_float3(just_above_x,            y, just_above_z);
+}
 
 
 template <typename key_type>
@@ -25,30 +54,12 @@ void convert_keys_to_primitives(
     double* build_time_ms
 ) {
     primitive_buffer.alloc(3 * key_count * sizeof(float3));
-    auto buffer_pointer = primitive_buffer.ptr<float3>();
 
     cuda_timer timer(0);
     timer.start();
-    lambda_kernel<<<SDIV(key_count, MAXBLOCKSIZE), MAXBLOCKSIZE>>>([=] DEVICEQUALIFIER {
-        const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
-        if (tid >= key_count) return;
-
-        rti_k64 key = keys_device_pointer[tid];
-        float x = uint32_as_float(key & 0x3fffffu);
-        float y = uint32_as_float((key >> 22u) & 0x3fffffu);
-        float z = uint32_as_float(key >> 44u);
-
-        float just_below_x = minus_eps(x);
-        float just_above_x = plus_eps(x);
-        float just_below_y = minus_eps(y);
-        float just_above_y = plus_eps(y);
-        float just_below_z = minus_eps(z);
-        float just_above_z = plus_eps(z);
-
-        buffer_pointer[3 * tid + 0] = make_float3(just_below_x, just_above_y, just_below_z);
-        buffer_pointer[3 * tid + 1] = make_float3(just_below_x, just_below_y, just_below_z);
-        buffer_pointer[3 * tid + 2] = make_float3(just_above_x,            y, just_above_z);
-    });
+    convert_keys_to_primitives_kernel<<<SDIV(key_count, MAXBLOCKSIZE), MAXBLOCKSIZE>>>(
+            keys_device_pointer, key_count, primitive_buffer.ptr<float3>()
+    );
     timer.stop();
     if (build_time_ms) *build_time_ms += timer.time_ms();
 }
@@ -151,6 +162,7 @@ OptixTraversableHandle build_traversable(
     }
 
     size_t temp_bytes2 = as_buffer.size_in_bytes + primitive_buffer.size_in_bytes + compacted_size_buffer.size_in_bytes + temp_buffer.size_in_bytes + uncompacted_structure_buffer.size_in_bytes;
+    // this computation is more complicated since buffers can be partially reused during build
     if (build_bytes) *build_bytes += std::max(temp_bytes1, temp_bytes2);
 
     return structure_handle;
@@ -175,6 +187,7 @@ void setup_probe_data(
     const value_type* stored_values,
     bool long_keys,
     bool has_range_queries,
+    bool keys_are_unique,
     const key_type* query_lower,
     const key_type* query_upper,
     value_type* result
@@ -185,6 +198,7 @@ void setup_probe_data(
     launch_params->stored_values = stored_values;
     launch_params->long_keys = long_keys;
     launch_params->has_range_queries = has_range_queries;
+    launch_params->keys_are_unique = keys_are_unique;
     launch_params->query_lower = query_lower;
     launch_params->query_upper = query_upper;
     launch_params->result = result;
@@ -201,9 +215,10 @@ private:
     cuda_buffer as_buffer;
 
 public:
-    static std::string short_description() {
-        return "rtx_index";
-    }
+    static constexpr char const* short_description = "rtx_index";
+    static constexpr bool can_lookup = true;
+    static constexpr bool can_multi_lookup = true;
+    static constexpr bool can_range_lookup = true;
 
     size_t gpu_resident_bytes() {
         return as_buffer.size_in_bytes + launch_params_buffer.size_in_bytes;
@@ -221,53 +236,99 @@ public:
     }
 
     template <typename value_type>
-    void query(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
+    void lookup(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
 
-        setup_probe_data<<<1, 1, 0, stream>>>(
-            launch_params_buffer.ptr<query_params>(),
-            value_column,
-            sizeof(key_type) == 8,
-            false,
-            keys,
-            keys,
-            result
-        ); CUERR
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> upload{"upload-params"};
+            setup_probe_data<<<1, 1, 0, stream>>>(
+                    launch_params_buffer.ptr<query_params>(),
+                    value_column,
+                    sizeof(key_type) == 8,
+                    false,
+                    true,
+                    keys,
+                    keys,
+                    result
+            );
+        }
 
-        OPTIX_CHECK(optixLaunch(
-                pipeline.pipeline,
-                stream,
-                launch_params_buffer.cu_ptr(),
-                launch_params_buffer.size_in_bytes,
-                &pipeline.sbt,
-                size,
-                1,
-                1
-        ))
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> launch{"launch"};
+            OPTIX_CHECK(optixLaunch(
+                    pipeline.pipeline,
+                    stream,
+                    launch_params_buffer.cu_ptr(),
+                    launch_params_buffer.size_in_bytes,
+                    &pipeline.sbt,
+                    size,
+                    1,
+                    1
+            ))
+        }
     }
 
     template <typename value_type>
-    void range_query_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
+    void multi_lookup_sum(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
 
-        setup_probe_data<<<1, 1, 0, stream>>>(
-            launch_params_buffer.ptr<query_params>(),
-            value_column,
-            sizeof(key_type) == 8,
-            true,
-            lower,
-            upper,
-            result
-        ); CUERR
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> upload{"upload-params"};
+            setup_probe_data<<<1, 1, 0, stream>>>(
+                    launch_params_buffer.ptr<query_params>(),
+                    value_column,
+                    sizeof(key_type) == 8,
+                    false,
+                    false,
+                    keys,
+                    keys,
+                    result
+            );
+        }
 
-        OPTIX_CHECK(optixLaunch(
-                pipeline.pipeline,
-                stream,
-                launch_params_buffer.cu_ptr(),
-                launch_params_buffer.size_in_bytes,
-                &pipeline.sbt,
-                size,
-                1,
-                1
-        ))
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> launch{"launch"};
+            OPTIX_CHECK(optixLaunch(
+                    pipeline.pipeline,
+                    stream,
+                    launch_params_buffer.cu_ptr(),
+                    launch_params_buffer.size_in_bytes,
+                    &pipeline.sbt,
+                    size,
+                    1,
+                    1
+            ))
+        }
+    }
+
+    template <typename value_type>
+    void range_lookup_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
+
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> upload{"upload-params"};
+            setup_probe_data<<<1, 1, 0, stream>>>(
+                launch_params_buffer.ptr<query_params>(),
+                value_column,
+                sizeof(key_type) == 8,
+                true,
+                false,
+                lower,
+                upper,
+                result
+            );
+        }
+
+        {
+            nvtx3::scoped_range_in<nvtx_rtx_domain> launch{"launch"};
+            OPTIX_CHECK(optixLaunch(
+                    pipeline.pipeline,
+                    stream,
+                    launch_params_buffer.cu_ptr(),
+                    launch_params_buffer.size_in_bytes,
+                    &pipeline.sbt,
+                    size,
+                    1,
+                    1
+            ))
+        }
     }
 
     void destroy() {

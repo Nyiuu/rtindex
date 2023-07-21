@@ -4,21 +4,21 @@
 
 extern "C" __constant__ query_params params;
 
-extern "C" GLOBALQUALIFIER void __closesthit__query() {
+extern "C" GLOBALQUALIFIER void __closesthit__lookup() {
     // do nothing
 }
 
-extern "C" GLOBALQUALIFIER void __miss__query() {
+extern "C" GLOBALQUALIFIER void __miss__lookup() {
     // do nothing
 }
 
-extern "C" GLOBALQUALIFIER void __anyhit__query() {
+extern "C" GLOBALQUALIFIER void __anyhit__lookup() {
     const unsigned int primitive_id = optixGetPrimitiveIndex();
 
     rti_v32 value = params.stored_values[primitive_id];
 
-    bool is_range_query = get_secondary_payload_32<bool>();
-    if (is_range_query) {
+    bool multiple_hits_possible = get_secondary_payload_32<bool>();
+    if (multiple_hits_possible) {
         set_payload_32(get_payload_32<rti_v32>() + value);
         // reject the hit, this prevents tmax from being reduced
         optixIgnoreIntersection();
@@ -27,8 +27,7 @@ extern "C" GLOBALQUALIFIER void __anyhit__query() {
     }
 }
 
-
-extern "C" GLOBALQUALIFIER void __raygen__query() {
+extern "C" GLOBALQUALIFIER void __raygen__lookup() {
     const unsigned int ix = optixGetLaunchIndex().x;
 
     rti_k64 key = params.long_keys ? ((rti_k64*)params.query_lower)[ix] : ((rti_k32*)params.query_lower)[ix];
@@ -40,23 +39,29 @@ extern "C" GLOBALQUALIFIER void __raygen__query() {
         upper_bound = params.long_keys ? ((rti_k64*)params.query_upper)[ix] : ((rti_k32*)params.query_upper)[ix];
     }
 
-    uint32_t i0 = is_range_query ? 0 : not_found<rti_v32>;
-    uint32_t i1 = is_range_query;
+    // a ray can hit multiple triangles if either
+    // - the query is a range query
+    // - the query is a point query, but some triangles exist multiple times
+    bool multiple_hits_possible = is_range_query || !params.keys_are_unique;
+
+    // aggregation register
+    uint32_t i0 = multiple_hits_possible ? 0 : not_found<rti_v32>;
+    uint32_t i1 = multiple_hits_possible;
 
     // if lower_bound == upper_bound, we can cast a perpendicular ray!
     if (is_range_query && lower_bound != upper_bound) {
         // decompose the key into x and yz
-        rti_k64 smallest_yz = lower_bound >> 22u;
-        rti_k64 largest_yz = upper_bound >> 22u;
-        float smallest_x = uint32_as_float(lower_bound & 0x3fffffu);
-        float largest_x = uint32_as_float(upper_bound & 0x3fffffu);
+        rti_k64 smallest_yz = lower_bound >> x_bits;
+        rti_k64 largest_yz = upper_bound >> x_bits;
+        float smallest_x = uint32_as_float(lower_bound & x_mask);
+        float largest_x = uint32_as_float(upper_bound & x_mask);
         float smallest_possible_x = uint32_as_float(0);
-        float largest_possible_x = uint32_as_float(0x3fffffu);
+        float largest_possible_x = uint32_as_float(x_mask);
 
         // cast one ray per yz offset
         for (uint64_t yz = smallest_yz; yz <= largest_yz; ++yz) {
-            float y = uint32_as_float(yz & 0x3fffffu);
-            float z = uint32_as_float(yz >> 22u);
+            float y = uint32_as_float(yz & y_mask);
+            float z = uint32_as_float(yz >> y_bits);
 
             float from = minus_eps(yz == smallest_yz ? smallest_x : smallest_possible_x);
             float to = plus_eps(yz == largest_yz ? largest_x : largest_possible_x);
@@ -85,9 +90,9 @@ extern "C" GLOBALQUALIFIER void __raygen__query() {
         }
         params.result[ix] = i0;
     } else {
-        float x = uint32_as_float(key & 0x3fffffu);
-        float y = uint32_as_float((key >> 22u) & 0x3fffffu);
-        float z = uint32_as_float(key >> 44u);
+        float x = uint32_as_float(key & x_mask);
+        float y = uint32_as_float((key >> x_bits) & y_mask);
+        float z = uint32_as_float(key >> (x_bits + y_bits));
     
         // perpendicular ray
         float3 origin = make_float3(x, y, minus_eps(z));

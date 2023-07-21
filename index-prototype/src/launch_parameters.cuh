@@ -10,6 +10,7 @@ struct typed_query_params {
 
     bool long_keys;
     bool has_range_queries;
+    bool keys_are_unique;
 
     const key_type* query_lower;
     const key_type* query_upper;

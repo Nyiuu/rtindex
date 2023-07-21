@@ -14,7 +14,7 @@ namespace cg = cooperative_groups;
 
 template <typename key_type, typename value_type>
 GLOBALQUALIFIER
-void naive_point_query_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* keys, value_type* result, size_t size) {
+void naive_point_lookup_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* keys, value_type* result, size_t size) {
     const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
     if (tid >= size) return;
 
@@ -31,7 +31,7 @@ void naive_point_query_scan(const key_type* stored_keys, size_t stored_size, con
 
 template <typename key_type, typename value_type>
 GLOBALQUALIFIER
-void naive_range_query_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size) {
+void naive_range_lookup_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size) {
     const auto tid = blockDim.x * blockIdx.x + threadIdx.x;
     if (tid >= size) return;
 
@@ -48,9 +48,11 @@ void naive_range_query_scan(const key_type* stored_keys, size_t stored_size, con
 }
 
 
+// UNTESTED
+/*
 template <typename key_type, typename value_type, size_t cg_size>
 GLOBALQUALIFIER
-void coop_point_query_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* keys, value_type* result, size_t size) {
+void coop_point_lookup_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* keys, value_type* result, size_t size) {
     
     auto tile = cg::tiled_partition<cg_size>(cg::this_thread_block());
     size_t thread_id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -64,11 +66,14 @@ void coop_point_query_scan(const key_type* stored_keys, size_t stored_size, cons
         size_t pos = ofst + tile.thread_rank();
         bool found = pos < stored_size && key == stored_keys[pos];
 
-        if (found) {
+        uint32_t found_group = tile.ballot(found);
+        uint32_t finder = __ffs(found_group);
+
+        if (found && finder == tile.thread_rank()) {
             result[group_id] = value_column[pos];
         }
 
-        if (tile.ballot(found) != 0) {
+        if (found_group != 0) {
             return;
         }
     }
@@ -76,11 +81,14 @@ void coop_point_query_scan(const key_type* stored_keys, size_t stored_size, cons
         result[group_id] = not_found<value_type>;
     }
 }
+ */
 
 
+// UNTESTED
+/*
 template <typename key_type, typename value_type, size_t cg_size>
 GLOBALQUALIFIER
-void coop_range_query_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size) {
+void coop_range_lookup_scan(const key_type* stored_keys, size_t stored_size, const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size) {
 
     auto tile = cg::tiled_partition<cg_size>(cg::this_thread_block());
     size_t thread_id = threadIdx.x + blockIdx.x * blockDim.x;
@@ -107,6 +115,7 @@ void coop_range_query_scan(const key_type* stored_keys, size_t stored_size, cons
         result[group_id] = agg;
     }
 }
+*/
 
 
 template <typename key_type_>
@@ -121,9 +130,10 @@ private:
     constexpr static size_t cg_size_log = 4;
 
 public:
-    static std::string short_description() {
-        return "scan";
-    }
+    static constexpr char const* short_description = "scan";
+    static constexpr bool can_lookup = true;
+    static constexpr bool can_multi_lookup = true;
+    static constexpr bool can_range_lookup = true;
 
     size_t gpu_resident_bytes() {
         return 0;
@@ -135,15 +145,21 @@ public:
     }
 
     template <typename value_type>
-    void query(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
-        naive_point_query_scan<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, result, size);
-        //coop_point_query_scan<<<SDIV(size << cg_size_log, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, result, size);
+    void lookup(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
+        naive_point_lookup_scan<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, result, size);
+        //coop_point_lookup_scan<<<SDIV(size << cg_size_log, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, result, size);
     }
 
     template <typename value_type>
-    void range_query_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
-        naive_range_query_scan<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, lower, upper, result, size);
-        //coop_range_query_scan<<<SDIV(size << cg_size_log, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, lower, upper, result, size);
+    void multi_lookup_sum(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
+        naive_range_lookup_scan<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, keys, result, size);
+        //coop_range_lookup_scan<<<SDIV(size << cg_size_log, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, keys, keys, result, size);
+    }
+
+    template <typename value_type>
+    void range_lookup_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
+        naive_range_lookup_scan<<<SDIV(size, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, lower, upper, result, size);
+        //coop_range_lookup_scan<<<SDIV(size << cg_size_log, MAXBLOCKSIZE), MAXBLOCKSIZE, 0, stream>>>(stored_keys, stored_size, value_column, lower, upper, result, size);
     }
 
     void destroy() {

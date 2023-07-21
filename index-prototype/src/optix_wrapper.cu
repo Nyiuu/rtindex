@@ -23,12 +23,13 @@ optix_wrapper::~optix_wrapper() {
 
 /*! helper function that initializes optix and checks for errors */
 void optix_wrapper::init_optix() {
-    cudaFree(0);
     int num;
     cudaGetDeviceCount(&num);
     if (num == 0)
         throw std::runtime_error("no CUDA capable devices found!");
 
+    cudaSetDevice(0);
+    cudaFree(0);
     OPTIX_CHECK(optixInit());
 }
 
@@ -63,6 +64,8 @@ void optix_wrapper::create_module() {
 
     module_compile_options.maxRegisterCount  = 0;
     module_compile_options.optLevel          = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+    // for profiling
+    //module_compile_options.debugLevel        = OPTIX_COMPILE_DEBUG_LEVEL_MODERATE;
     module_compile_options.debugLevel        = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
 
     pipeline_compile_options = {};

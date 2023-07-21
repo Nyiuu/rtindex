@@ -45,31 +45,43 @@ float uint32_as_float(uint32_t i) {
 #if INT_TO_FLOAT_CONVERSION_MODE == 2
     // CONFIRMED TO BE WORKING UP TO 2^29
     // after that, we quickly reach NaN range
-    // however, 2^29 is sufficient since it is the
-    // "maximum number of primitives per geometry acceleration structure"
-    // https://raytracing-docs.nvidia.com/optix7/guide/index.html#limits
-
-    //uint32_t skip = (i << 1u) + 0x2f800000u; // constant chosen by trial
+    //uint32_t skip = (i << 1u) + 0x2f800000u; // constant chosen by trial and error
     uint32_t skip = (i << 1u) + 0x3f000000u; // constant is 0.5 in binary
     float result = *reinterpret_cast<float*>(&skip);
+#elif INT_TO_FLOAT_CONVERSION_MODE == 1
+    // CONFIRMED TO BE WORKING UP TO (2^24 - 2)
+    float result = static_cast<float>(i) + 1;
 #else
-    // CONFIRMED TO BE WORKING UP TO (2^23 - 1) FOR eps = 0.5
-    // CONFIRMED TO BE WORKING UP TO (2^24 - 1) FOR eps = 1
-    float result = static_cast<float>(i + 1);
+    // CONFIRMED TO BE WORKING UP TO (2^23 - 1)
+    float result = static_cast<float>(i) + 0.5;
 #endif
     return bias_exponent(result);
 }
 
+constexpr uint32_t x_bits = KEY_DECOMPOSITION / 10000 % 100;
+constexpr uint32_t y_bits = KEY_DECOMPOSITION / 100 % 100;
+constexpr uint32_t z_bits = KEY_DECOMPOSITION % 100;
+constexpr key_type x_mask = key_type((size_t{1} << x_bits) - 1);
+constexpr key_type y_mask = key_type((size_t{1} << y_bits) - 1);
+
+
 HOSTDEVICEQUALIFIER INLINEQUALIFIER
 void key_to_coordinates(key_type key, float& x, float& y, float& z) {
 #if INT_TO_FLOAT_CONVERSION_MODE == 3
-    x = uint32_as_float(key & 0x3fffffu);
-    y = uint32_as_float((key >> 22u) & 0x3fffffu);
-#if LARGE_KEYS != 0
-    z = uint32_as_float(key >> 44u);
-#else
-    z = uint32_as_float(0);
-#endif
+    static_assert(x_bits > 0);
+    static_assert(x_bits < 24);
+    static_assert(y_bits < 24);
+    static_assert(z_bits < 24);
+    static_assert(x_bits + y_bits + z_bits == sizeof(key_type) * 8);
+
+    x = uint32_as_float(key & x_mask);
+    y = uint32_as_float((key >> x_bits) & y_mask);
+    if constexpr (z_bits > 0) {
+        z = uint32_as_float(key >> (x_bits + y_bits));
+    } else {
+        z = uint32_as_float(0);
+    }
+
 #else
     x = uint32_as_float(key);
     y = uint32_as_float(0);
@@ -79,7 +91,7 @@ void key_to_coordinates(key_type key, float& x, float& y, float& z) {
 
 
 #if INT_TO_FLOAT_CONVERSION_MODE == 0
-constexpr size_t max_key = (size_t{1} << 23u) - 2u;
+constexpr size_t max_key = (size_t{1} << 23u) - 1u;
 #elif INT_TO_FLOAT_CONVERSION_MODE == 1
 constexpr size_t max_key = (size_t{1} << 24u) - 2u;
 #elif INT_TO_FLOAT_CONVERSION_MODE == 2
@@ -91,7 +103,7 @@ constexpr size_t max_key = std::numeric_limits<size_t>::max();
 #endif
 
 
-constexpr value_type NOT_FOUND = std::numeric_limits<value_type>::max();
+constexpr value_type NOT_FOUND = 0;
 
 
 HOSTDEVICEQUALIFIER INLINEQUALIFIER
@@ -100,6 +112,12 @@ float plus_eps(float f) {
     uint32_t i = *reinterpret_cast<uint32_t*>(&f);
     i += 1;
     return *reinterpret_cast<float*>(&i);
+#elif INT_TO_FLOAT_CONVERSION_MODE == 1
+    // treat largest key as a special case (not currently used)
+    //constexpr float precision_limit = float(size_t{1} << 24u);
+    //constexpr float next_after_precision_limit = float((size_t{1} << 24u) + 2);
+    //return f == precision_limit ? next_after_precision_limit : f + eps;
+    return f + eps;
 #else
     return f + eps;
 #endif

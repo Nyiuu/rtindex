@@ -21,9 +21,16 @@
   }
 
 
+constexpr uint32_t x_bits = 23;
+constexpr uint32_t y_bits = 23;
+constexpr uint32_t z_bits = 18;
+constexpr rti_k64 x_mask = rti_k64((size_t{1} << x_bits) - 1);
+constexpr rti_k64 y_mask = rti_k64((size_t{1} << y_bits) - 1);
+
+
 HOSTQUALIFIER DEVICEQUALIFIER INLINEQUALIFIER
 float uint32_as_float(uint32_t i) {
-    return static_cast<float>(i + 1);
+    return static_cast<float>(i) + 0.5;
 }
 
 DEVICEQUALIFIER INLINEQUALIFIER

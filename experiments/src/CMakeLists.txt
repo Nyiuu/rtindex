@@ -15,6 +15,8 @@ mark_as_advanced(CUDA_SDK_ROOT_DIR)
 
 include(cmake/configure_optix.cmake)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/nvtx/nvtxImportedTargets.cmake)
+
 include_directories(${OptiX_INCLUDE})
 
 cuda_compile_and_embed(embedded_ptx_code device_code.cu)
@@ -36,18 +38,22 @@ add_executable(run_experiment
         default_test_configuration.h
         )
 
-set_property(TARGET run_experiment PROPERTY CUDA_ARCHITECTURES
-        75     # TURING
-        80 86  # AMPERE
-        89     # ADA
-        )
+set_target_properties(run_experiment PROPERTIES CUDA_ARCHITECTURES "75;80;86;89")
+# 75 TURING
+# 80 AMPERE
+# 86 AMPERE
+# 89 ADA
 
-target_compile_options(run_experiment PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror ${OpenMP_CXX_FLAGS}>
-        )
+target_compile_options(run_experiment PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+        # profiling
+        #-g -shared-libgcc -fno-omit-frame-pointer
+        -Wall -Wextra -Wpedantic -Werror
+        ${OpenMP_CXX_FLAGS}
+        >)
         
 target_compile_options(run_experiment PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
-#        -lineinfo -g --profile
+        # profiling
+        #-lineinfo -g --profile
         --extended-lambda --use_fast_math --expt-relaxed-constexpr
         -O3
         -Xcompiler=-fopenmp
@@ -58,4 +64,6 @@ target_link_libraries(run_experiment
         ${CUDA_LIBRARIES}
         ${CUDA_CUDA_LIBRARY}
         OpenMP::OpenMP_CXX
+        # profiling
+        nvtx3-cpp
         )

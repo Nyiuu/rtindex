@@ -61,7 +61,7 @@ void optix_pipeline::create_raygen_programs() {
     OptixProgramGroupDesc pg_desc       = {};
     pg_desc.kind                        = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     pg_desc.raygen.module               = optix->module;
-    pg_desc.raygen.entryFunctionName    = "__raygen__query";
+    pg_desc.raygen.entryFunctionName    = "__raygen__lookup";
 
     char log[2048];
     size_t sizeof_log = sizeof(log);
@@ -85,7 +85,7 @@ void optix_pipeline::create_miss_programs() {
         OptixProgramGroupDesc pg_desc       = {};
         pg_desc.kind                        = OPTIX_PROGRAM_GROUP_KIND_MISS;
         pg_desc.miss.module                 = optix->module;
-        pg_desc.miss.entryFunctionName      = "__miss__query";
+        pg_desc.miss.entryFunctionName      = "__miss__lookup";
 
         char log[2048];
         size_t sizeof_log = sizeof(log);
@@ -110,9 +110,9 @@ void optix_pipeline::create_hitgroup_programs() {
         OptixProgramGroupDesc pg_desc        = {};
         pg_desc.kind                         = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
         pg_desc.hitgroup.moduleCH            = optix->module;
-        pg_desc.hitgroup.entryFunctionNameCH = "__closesthit__query";
+        pg_desc.hitgroup.entryFunctionNameCH = "__closesthit__lookup";
         pg_desc.hitgroup.moduleAH            = optix->module;
-        pg_desc.hitgroup.entryFunctionNameAH = "__anyhit__query";
+        pg_desc.hitgroup.entryFunctionNameAH = "__anyhit__lookup";
 
         char log[2048];
         size_t sizeof_log = sizeof(log);

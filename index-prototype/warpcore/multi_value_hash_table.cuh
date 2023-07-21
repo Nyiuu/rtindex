@@ -316,6 +316,56 @@ public:
         (keys_in, values_in, num_in, *this, probing_length, status_out);
     }
 
+    // TODO TEST
+    /*! \brief retrieves a key from the hash table
+     * \param[in] key_in key to retrieve from the hash table
+     * \param[out] value_out value for \c key_in
+     * \param[in] group cooperative group
+     * \param[in] probing_length maximum number of probing attempts
+     * \return status (per thread)
+     */
+    DEVICEQUALIFIER INLINEQUALIFIER
+    status_type retrieve(
+            const key_type key_in,
+            value_type& value_out,
+            const cg::thread_block_tile<cg_size()>& group,
+            const index_type probing_length = defaults::probing_length()) const noexcept
+    {
+        if(!is_initialized_) return status_type::not_initialized();
+
+        if(!is_valid_key(key_in))
+        {
+            status_->atomic_join(status_type::invalid_key());
+            return status_type::invalid_key();
+        }
+
+        ProbingScheme iter(capacity(), probing_length, group);
+
+        for(index_type i = iter.begin(key_in, seed_); i != iter.end(); i = iter.next())
+        {
+            key_type table_key = table_[i].key;
+            const bool hit = (table_key == key_in);
+            const auto hit_mask = group.ballot(hit);
+
+            if(hit_mask)
+            {
+                const auto leader = ffs(hit_mask) - 1;
+                value_out = table_[group.shfl(i, leader)].value;
+
+                return status_type::none();
+            }
+
+            if(group.any(is_empty_key(table_key)))
+            {
+                status_->atomic_join(status_type::key_not_found());
+                return status_type::key_not_found();
+            }
+        }
+
+        status_->atomic_join(status_type::probing_length_exceeded());
+        return status_type::probing_length_exceeded();
+    }
+
      /*! \brief retrieves all values to a corresponding key
      * \param[in] key_in key to retrieve from the hash table
      * \param[out] values_out values for \c key_in

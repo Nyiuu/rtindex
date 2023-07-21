@@ -29,7 +29,7 @@ struct cuda_buffer {
     void alloc(size_t size) {
         assert(raw_ptr == nullptr);
         size_in_bytes = size;
-        cudaMalloc((void**)&raw_ptr, size_in_bytes); CUERR
+        cudaMalloc((void**)&raw_ptr, size_in_bytes);
     }
 
     void free() {

@@ -56,7 +56,7 @@ void modified_find_kernel(
 
 template <typename key_type, typename value_type, typename size_type, typename btree>
 GLOBALQUALIFIER
-void modified_range_query_kernel(
+void modified_range_lookup_kernel(
     const key_type* lower_bounds,
     const key_type* upper_bounds,
     const value_type* stored_values,
@@ -94,22 +94,13 @@ void modified_range_query_kernel(
       auto cur_rank        = __ffs(work_queue) - 1;
       auto cur_lower_bound = tile.shfl(lower_bound, cur_rank);
       auto cur_upper_bound = tile.shfl(upper_bound, cur_rank);
-#ifdef SINGLE_ELEMENT_RANGE_IS_POINT_QUERY
-      if (cur_lower_bound == cur_upper_bound) {
-        auto r = tree.cooperative_find(cur_lower_bound, tile, allocator, concurrent);
-        cur_result = r != std::numeric_limits<uint32_t>::max() ? r : 0;
-      } else {
-#endif
-        cur_result = tree.modified_cooperative_range_query(
-          cur_lower_bound,
-          cur_upper_bound,
-          tile,
-          allocator,
-          stored_values,
-          concurrent);
-#ifdef SINGLE_ELEMENT_RANGE_IS_POINT_QUERY
-      }
-#endif
+      cur_result = tree.modified_cooperative_range_query(
+        cur_lower_bound,
+        cur_upper_bound,
+        tile,
+        allocator,
+        stored_values,
+        concurrent);
 
       if (cur_rank == tile.thread_rank()) {
         result = cur_result;
@@ -224,7 +215,7 @@ void test_modified_btree() {
     cudaDeviceSynchronize(); CUERR
     //modified_insert_kernel<<<SDIV(keys.size(), 512), 512>>>(kb.ptr<uint32_t>(), keys.size(), tree);
     //modified_find_kernel<<<SDIV(probes.size(), 512), 512>>>(pb.ptr<uint32_t>(), vb.ptr<uint32_t>(), rb.ptr<uint32_t>(), probes.size(), tree);
-    modified_range_query_kernel<<<SDIV(probes.size(), 512), 512>>>(pb.ptr<uint32_t>(), pub.ptr<uint32_t>(), vb.ptr<uint32_t>(), rb.ptr<uint32_t>(), probes.size(), tree);
+    modified_range_lookup_kernel<<<SDIV(probes.size(), 512), 512>>>(pb.ptr<uint32_t>(), pub.ptr<uint32_t>(), vb.ptr<uint32_t>(), rb.ptr<uint32_t>(), probes.size(), tree);
     cudaDeviceSynchronize(); CUERR
 
     rb.download(results.data(), results.size());
@@ -232,6 +223,7 @@ void test_modified_btree() {
         std::cout << x << std::endl;
     }
 }
+
 
 template <typename key_type_>
 class tree {
@@ -243,9 +235,10 @@ private:
     std::optional<gpu_blink_tree<key_type, rti_v32, 16>> wrapped_tree;
 
 public:
-    static std::string short_description() {
-        return "b_link_tree";
-    }
+    static constexpr char const* short_description = "b_link_tree";
+    static constexpr bool can_lookup = true;
+    static constexpr bool can_multi_lookup = false;
+    static constexpr bool can_range_lookup = true;
 
     size_t gpu_resident_bytes() {
         return wrapped_tree.value().compute_memory_usage_bytes();
@@ -291,13 +284,17 @@ public:
     }
 
     template <typename value_type>
-    void query(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
+    void lookup(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
         modified_find_kernel<<<SDIV(size, 512), 512, 0, stream>>>(keys, value_column, result, size, wrapped_tree.value());
     }
 
     template <typename value_type>
-    void range_query_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
-        modified_range_query_kernel<<<SDIV(size, 512), 512, 0, stream>>>(lower, upper, value_column, result, size, wrapped_tree.value());
+    void multi_lookup_sum(const value_type* value_column, const key_type* keys, value_type* result, size_t size, cudaStream_t stream) {
+    }
+
+    template <typename value_type>
+    void range_lookup_sum(const value_type* value_column, const key_type* lower, const key_type* upper, value_type* result, size_t size, cudaStream_t stream) {
+        modified_range_lookup_kernel<<<SDIV(size, 512), 512, 0, stream>>>(lower, upper, value_column, result, size, wrapped_tree.value());
     }
 
     void destroy() {

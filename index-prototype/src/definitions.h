@@ -24,9 +24,14 @@ constexpr value_type not_found = std::numeric_limits<value_type>::max();
 // never generate key 0 (conflict with b+ tree)
 // never generate MAX_KEY (conflict with b+ tree and hash table)
 // never generate MAX_KEY - 1 (conflict with hash table)
+// also reserve 1 and MAX_KEY - 2 to test out-of-range lookups
 template <typename key_type>
-constexpr key_type min_usable_key = 1;
+constexpr key_type min_usable_key = 2;
 template <typename key_type>
-constexpr key_type max_usable_key = std::numeric_limits<key_type>::max() - 2;
+constexpr key_type max_usable_key = std::numeric_limits<key_type>::max() - 3;
+template <typename key_type>
+constexpr key_type min_out_of_range = 1;
+template <typename key_type>
+constexpr key_type max_out_of_range = std::numeric_limits<key_type>::max() - 2;
 
 #endif

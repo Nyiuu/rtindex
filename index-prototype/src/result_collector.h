@@ -46,7 +46,7 @@ class result_collector {
     std::vector<column> columns;
     std::map<std::string, std::string> current_row;
     size_t num_rows = 0;
-    size_t precision = 3;
+    size_t precision = 10;
     bool header;
 
     std::string padding(const column& col, size_t entry_size) {
@@ -67,20 +67,6 @@ public:
     }
 
     void commit_line() {
-        /*
-        // temporary fix: also print to stdout
-        {
-            bool first = true;
-            for (const auto& new_entry : current_row) {
-                const auto& col_name = new_entry.first;
-                const auto& value = new_entry.second;
-                if (!first) std::cout << sep;
-                first = false;
-                std::cout << col_name << "=" << value;
-            }
-            std::cout << std::endl;
-        }
-        */
         // existing columns
         for (auto& col : columns) {
             std::map<std::string, std::string>::iterator it;
