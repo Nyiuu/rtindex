@@ -46,3 +46,18 @@ The code builds upon Ingo Wald's SIGGRAPH course, available at <https://github.c
 - Run `start-design-experiments.sh` to run all design experiments. The results will be copied to the `results` directory.
 - Run `start-comparison-experiments.sh` to run all comparison experiments. The results will be copied to the `results` directory.
 - Run `plot.sh` to create all plots from the paper (in the corresponding subdirectories of the `results` directory).
+
+## Implementation Details
+
+The codebase consists of two parts, which use very different experimentation workflows.
+In either case, the input dataset is generated on-the-fly, but in a deterministic fashion to ensure reproducibility.
+
+The _design experiments_ are located in the `experiments` directory.
+The input data and test setup are specified in `src/benchmark.py`, with data being generated in `src/main.cu`.
+This part of the code makes heavy use of conditional preprocessor macros to achieve the best possible compile-time optimization.
+Therefore, the macros have to be reconfigured before each experiment, followed by a re-compilation, both of which is automated via `src/benchmark.py`.
+
+The _comparison experiments_ are located in the `index-prototype` directory.
+The input data is specified in `src/benchmarks.cuh` and generated in `src/input_generation.h`.
+Here, compiling once will be sufficient to include all benchmarks.
+
