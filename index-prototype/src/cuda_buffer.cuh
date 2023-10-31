@@ -1,7 +1,7 @@
 #pragma once
 
 #include "optix_helpers.cuh"
-#include "cuda_helpers.cuh"
+#include "../ext/cudahelpers/cuda_helpers.cuh"
 
 #include <cassert>
 #include <vector>

@@ -1,5 +1,5 @@
 #include "optix_pipeline.h"
-#include "cuda_helpers.cuh"
+#include "../ext/cudahelpers/cuda_helpers.cuh"
 
 
 static void print_log(const char *message) {

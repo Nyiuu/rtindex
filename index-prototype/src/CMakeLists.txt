@@ -29,7 +29,6 @@ add_executable(index_prototype
         main.cu
         benchmarks.cuh
         cuda_buffer.cuh
-        cuda_helpers.cuh
         definitions.h
         impl_binsearch.cuh
         impl_hashtable.cuh

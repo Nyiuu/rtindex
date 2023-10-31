@@ -4,6 +4,7 @@
 #include "definitions.h"
 #include "utilities.h"
 
+#include <optional>
 #include <random>
 #include <vector>
 

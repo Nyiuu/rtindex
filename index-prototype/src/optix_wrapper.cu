@@ -1,6 +1,6 @@
 #include "optix_wrapper.h"
 
-#include "cuda_helpers.cuh"
+#include "../ext/cudahelpers/cuda_helpers.cuh"
 
 // this include may only appear in a single source file:
 #include <optix_function_table_definition.h>

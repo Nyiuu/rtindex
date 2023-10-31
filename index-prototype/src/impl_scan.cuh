@@ -5,7 +5,7 @@
 
 #include "definitions.h"
 #include "cuda_buffer.cuh"
-#include "cuda_helpers.cuh"
+#include "../ext/cudahelpers/cuda_helpers.cuh"
 #include "utilities.h"
 
 

@@ -7,7 +7,7 @@
 #include <optix_stubs.h>
 
 #include "definitions.h"
-#include "cuda_helpers.cuh"
+#include "../ext/cudahelpers/cuda_helpers.cuh"
 
 
 #define OPTIX_CHECK( call )                                             \

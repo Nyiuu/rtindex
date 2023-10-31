@@ -4,6 +4,8 @@ This repository contains the code for the paper _RTIndeX: Exploiting Hardware-Ac
 
 The code builds upon Ingo Wald's SIGGRAPH course, available at <https://github.com/ingowald/optix7course>.
 
+**UPDATE 2023/10/31** We fixed a bug related to duplicate header inclusion.
+
 ## Prerequisites
 
 - Your **GPU must support NVIDIA RTX (hardware raytracing acceleration)**. For consumer GPUs, this applies to **NVIDIA RTX 2000, 3000, and 4000** series, but there are workstation and data-center GPUs that also support RTX.

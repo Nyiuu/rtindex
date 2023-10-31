@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
+#include <unordered_set>
 
 #include <cub/cub.cuh>
 
