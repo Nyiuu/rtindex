@@ -56,6 +56,17 @@
 #endif
 
 #ifdef __CUDACC__
+    #define CUERR {                                                            \
+        cudaError_t err;                                                       \
+        if ((err = cudaGetLastError()) != cudaSuccess) {                       \
+            std::cout << "CUDA error: " << cudaGetErrorString(err) << " : "    \
+                      << __FILE__ << ", line " << __LINE__ << std::endl;       \
+            exit(1);                                                           \
+        }                                                                      \
+    }
+#endif
+
+#ifdef __CUDACC__
     // only valid for linear kernel i.e. y = z = 0
     DEVICEQUALIFIER INLINEQUALIFIER
     std::uint64_t global_thread_id() noexcept
