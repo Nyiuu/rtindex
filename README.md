@@ -1,4 +1,5 @@
 # RTIndeX Experiments
+THis repository was forked from https://gitlab.rlp.net/juhenneb/rtindex for self-study
 
 This repository contains the code for the paper _RTIndeX: Exploiting Hardware-Accelerated GPU Raytracing for Database Indexing_, accepted at VLDB 2024, available at <https://www.vldb.org/pvldb/vol16/p4268-schuhknecht.pdf>.
 
